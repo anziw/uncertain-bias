@@ -1,0 +1,181 @@
+---
+title: "Statistical analysis brainstorm "
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(lme4)
+library(tidyverse)
+```
+
+## Load data
+
+```{r}
+dat = read.csv('../data/processed_data.csv')
+
+```
+
+## Plotting data
+
+```{r}
+
+summ1 <- dat %>%
+  group_by(event_type, outcome, color, utterance) %>%
+  summarize(mean_prob = mean(prob),
+            se_prob = sd(prob)/sqrt(n()),
+            .groups='drop')
+  
+
+ggplot(summ1, aes(x=outcome, y=mean_prob,
+                 color=utterance, linetype = utterance, shape=utterance)) + 
+  geom_point() + 
+  geom_line() + 
+  geom_errorbar(aes(ymin=mean_prob - 2*se_prob,
+                    ymax=mean_prob + 2*se_prob),
+                width = 0.2) +
+  facet_grid(color~event_type) +
+  scale_x_continuous(breaks=seq(10, 90, 10))
+  
+```
+
+
+```{r}
+
+summ2 <- dat %>%
+  group_by(event_type, outcome, utterance) %>%
+  summarize(mean_prob = mean(prob),
+            se_prob = sd(prob)/sqrt(n()),
+            .groups='drop')
+  
+
+ggplot(summ2, aes(x=outcome, y=mean_prob,
+                 color=utterance, linetype = utterance, shape=utterance)) + 
+  geom_point() + 
+  geom_line() + 
+  geom_errorbar(aes(ymin=mean_prob - 2*se_prob,
+                    ymax=mean_prob + 2*se_prob),
+                width = 0.2) +
+  facet_grid(~event_type) +
+  scale_x_continuous(breaks=seq(10, 90, 10))
+  
+```
+
+## Ideas for analysis
+
+Goal: we want to know if participants are using uncertainty expressions differently for election vs. gumball cases. Specifically, it looks like they are using "might" and "bare not" very differently. We want to see if this is a significant difference. 
+
+#### Option 1: Use logistic regression
+
+The goal of logistic regression would be to fit the curve. The issue with this approach is that "might" seems to have a u-shaped curve that cannot be fit with logistic regression. One way to counter this is to split the data into two parts: outcomes less than 50% and greater than 50%.
+
+Why 50%?
+
+- Empirically it looks like that is where the curve changes (both in our data, but also in Experiment 1 of Schuster and Degen). 
+
+- Conceptually it makes sense that at 50% people's perception of events changes? 
+
+**Option 1a**
+Use logistic regression separately for each utterance (prob of utterance, and 1-prob of utterance). 
+
+Pro: Easy to interpret. For HSP abstract for example, easier to make the point about P(might) -- because really looks like P(probably) isn't really that different. 
+
+Con: Makes an independent assumption thats not fully valid? 
+
+**Option 1b**
+
+Use multinomial logistic regression. 
+
+Pro: Seems like the "right" way to model this data. 
+
+Con: I am not fully sure how to interpret these models. 
+
+#### Option 2: Use area under the curve
+
+Schuster and Degen use this approach to model their data. 
+
+"Following Yildirim et al., 2016, we quantified this prediction by fitting a spline with four knots for each expression and each participant and computing the area under the curve (AUC) for the splines corresponding to each expression and participant. The area under the curve is proportional to how highly and for how large a range of event probabilities participants rate an utterance. If an utterance is rated highly for a larger range of event probabilities, the AUC will also be larger. We therefore tested whether listeners updated their expectations according to these intuitions by computing the difference between the AUC of the spline for MIGHT and of the spline for PROBABLY for each participant. We predicted that the mean AUC difference would be larger in the cautious speaker condition than in the confident speaker condition."
+
+Pro: Does not require us to split the data in half. Also can say "as in previous work". Overall seems like a reasonable way of modeling the data. 
+
+Con: I am not 100% sure how to do this/ interpret this correctly under time crunch. Also worried that it might be tricky to explain in HSP abstract. 
+
+#### Decision for HSP abstract
+
+Go with Option 1a because it seems the most straightforward to interpret and explain (even if not perfect). Can state in future work that other analysis methods should be used? 
+
+Also deciding to average over the different colors because we do not expect any differences there. Maybe treat this as a random effect? 
+
+
+## Logistic regression for "might"
+
+#### First half
+
+Predictions: 
+
+1. Positive coefficient for `outcome` (when it is z-scored): as P(outcome) increases from 10 to 50, people use might more frequently. 
+
+2. Positive coefficient for `eventtype` (where gumball is coded as 1): people use might more for gumball than for election
+
+3. Negative coefficient for `eventtype:gumball`: as P(outcome) approaches 50%, people's use of "might" increases more for election than gumball (since gumball will be high from the beginning). 
+
+
+```{r}
+
+might_firsthalf <- glmer(prob ~ scale(outcome)*event_type +
+                           (1 + scale(outcome)*event_type | random_id) + 
+                           (1 + scale(outcome)*event_type | color),
+                         family = binomial,
+                         data=subset(dat, outcome <= 50 
+                                     & utterance=="might"))
+
+summary(might_firsthalf)
+
+```
+
+#### Second half
+
+Predictions: 
+
+1. Negative coefficient for `outcome` (when it is z-scored): as P(outcome) increases from 50 to 100, people use might less frequently. 
+
+2. Positive coefficient for `eventtype` (where gumball is coded as 1): people use might more for gumball than for election
+
+3. Positive coefficient for `eventtype:gumball`: as P(outcome) approaches 100%, people's use of "might" is higher for gumball than for election. (might is still broadly acceptable for gumball). 
+
+```{r}
+
+might_secondhalf <- glmer(prob ~ scale(outcome)*event_type +
+                           (1 + scale(outcome)*event_type | random_id) + 
+                           (1 + scale(outcome)*event_type | color),
+                         family = binomial,
+                         data=subset(dat, outcome > 50 
+                                     & utterance=="might"))
+
+summary(might_secondhalf)
+
+```
+
+## Logistic regression for "bare not"
+
+Predictions inverse of might. 
+
+1. Negative coefficient for `outcome` (when it is z-scored): as P(outcome) increases from 10 to 50, people use not less frequently. 
+
+2. Negatie coefficient for `eventtype` (where gumball is coded as 1): people use bare not less for gumball than for election
+
+3. Positive coefficient for `eventtype:gumball`: as P(outcome) approaches 50%, people's use of "bare not" decreases more for election than gumball (two negatives make positive). 
+
+
+```{r}
+
+not_firsthalf <- glmer(prob ~ scale(outcome)*event_type +
+                           (1 + scale(outcome)*event_type | random_id) + 
+                           (1 + scale(outcome)*event_type | color),
+                         family = binomial,
+                         data=subset(dat, outcome <= 50 
+                                     & utterance=="bare not"))
+
+summary(not_firsthalf)
+
+```
