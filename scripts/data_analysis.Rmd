@@ -1,0 +1,234 @@
+---
+title: "sliders"
+output: html_document
+date: "2024-11-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+```
+
+```{r import data}
+# Set working directory to source file location
+
+# User-defined function to read in PCIbex Farm results files
+read.pcibex <- function(filepath, auto.colnames=TRUE, fun.col=function(col,cols){cols[cols==col]<-paste(col,"Ibex",sep=".");return(cols)}) {
+  n.cols <- max(count.fields(filepath,sep=",",quote=NULL),na.rm=TRUE)
+  if (auto.colnames){
+    cols <- c()
+    con <- file(filepath, "r")
+    while ( TRUE ) {
+      line <- readLines(con, n = 1, warn=FALSE)
+      if ( length(line) == 0) {
+        break
+      }
+      m <- regmatches(line,regexec("^# (\\d+)\\. (.+)\\.$",line))[[1]]
+      if (length(m) == 3) {
+        index <- as.numeric(m[2])
+        value <- m[3]
+        if (is.function(fun.col)){
+         cols <- fun.col(value,cols)
+        }
+        cols[index] <- value
+        if (index == n.cols){
+          break
+        }
+      }
+    }
+    close(con)
+    return(read.csv(filepath, comment.char="#", header=FALSE, col.names=cols))
+  }
+  else{
+    return(read.csv(filepath, comment.char="#", header=FALSE, col.names=seq(1:n.cols)))
+  }
+}
+
+# Read in results file
+results <- read.pcibex("gumball_vs_unk_election_120.csv")
+```
+
+```{r assign random ids}
+# Group participants by their Prolific IDs
+
+df <- subset(results, select=-c(Results.reception.time, Controller.name, Inner.element.number, Latin.Square.Group))
+df <- df %>%
+  rename(trial_id = id) %>%
+  rename(ip_address = MD5.hash.of.participant.s.IP.address)
+
+prolific_ids <- df %>%
+  filter(Parameter == "prolific_id") %>%
+  pull(Value)
+
+ips <- unique(df$ip_address)
+
+ip_to_id <- data.frame(prolific_id = prolific_ids, ip_address = ips)
+df <- df %>%
+  left_join(ip_to_id, by = "ip_address") %>%
+  select(-ip_address)
+
+# Create a mapping from Prolific ID to random ID
+set.seed(13) # make sure participants get the same random ID each time
+prolific_ids <- unique(df$prolific_id)
+random_ids <- sample(1:length(prolific_ids), length(prolific_ids), replace = FALSE)
+ip_to_id <- ip_to_id %>%
+  mutate(random_id = as.character(random_ids))
+
+write.csv(ip_to_id, "id_mapping_gumball_vs_unk_election.csv", row.names = FALSE)
+
+df <- df %>%
+  left_join(ip_to_id, by = "prolific_id") %>%
+  select(-c(prolific_id, ip_address))
+
+print(length(unique(df$random_id)))
+
+# df$random_id <- as.character(df$random_id)
+```
+
+```{r lists and conditions}
+# Print all lists and no. of participants per list
+dat <- df %>%
+  group_by(group) %>%
+  summarize(unique_random_ids = n_distinct(random_id))
+print(dat)
+
+# No. of trials in every condition (gumball, ballots)
+dat <- NULL
+dat <- df %>%
+  filter(PennElementType == "Scale", Label == "trials") %>%
+  group_by(trial_id) %>%
+  summarize(count = n()/4) # Number of sliders per trial
+print(dat)
+```
+
+```{r participants exclusion}
+# Exclude participants that are not in the US
+dat <- NULL
+not_in_us <- df %>%
+  filter(Parameter == "in_us", Value != "Yes") %>%
+  pull(random_id)
+
+
+# Exclude participants that lived in US <=10 years in recent years
+dat <- NULL
+years_in_us <- df %>%
+  filter(Parameter == "years_us") %>%
+  mutate(numeric_value = as.numeric(Value)) %>%
+  filter(!is.na(numeric_value) & numeric_value <= 10) %>%
+  pull(random_id)
+
+
+# Percentage of English use
+convert_value <- function(value) {
+  converted_value <- sub(".*to", "", value)
+  return(as.numeric(converted_value))
+}
+
+dat <- NULL
+dat <- df %>%
+  filter(Parameter == "home_eng" | Parameter == "work_eng" | Parameter == "social_eng")
+dat$Value <- sapply(dat$Value, convert_value)
+dat <- dat %>%
+  group_by(random_id) %>%
+  summarize(avg_eng_use = mean(Value)) %>%
+  mutate(random_id = fct_reorder(random_id, avg_eng_use))
+not_enough_eng <- dat %>%
+  filter(avg_eng_use < 80) %>%
+  pull(random_id)
+
+ggplot(dat, aes(x = random_id, y = avg_eng_use)) +
+  geom_point() + 
+  labs(x = "ID", y = "Percentage of English Use", title = "Percentage of English Use by ID")
+
+
+# Proportion of attention checks failed per participant
+dat <- NULL
+dat <- df %>%
+  filter(PennElementName == "selection") %>%
+  group_by(random_id) %>%
+  summarize(accuracy = mean(Value=="correct")*100) %>%
+  mutate(random_id = fct_reorder(random_id, accuracy))
+low_accu <- dat %>%
+  filter(accuracy < 85) %>%
+  pull(random_id)
+ggplot(dat, aes(x=random_id, y=accuracy)) +
+  geom_point() + 
+  labs(x = "ID", y = "Accuracy", title = "Accuracy by ID")
+
+exclude <- c(not_in_us, years_in_us, not_enough_eng, low_accu)
+exclude <- unique(exclude)
+
+df <- df %>%
+  filter(!random_id %in% exclude)
+
+print(length(unique(df$random_id)))
+```
+
+```{r sliders -> utterances}
+dat <- NULL
+
+# slider names to utterances
+dat <- df %>%
+  filter(PennElementName=="slider-1" | PennElementName=="slider-2" | PennElementName=="slider-3") %>%
+  select(random_id, Order.number.of.item, trial_id, PennElementName, Value) %>%
+  mutate(utterance = ifelse(PennElementName == "slider-1", "probably",
+                            ifelse(PennElementName == "slider-2", "might", "bare not"))) %>%
+  select(-PennElementName) %>%
+  rename(value = Value, trial_num = Order.number.of.item)
+
+# normalize within each trial
+dat <- dat %>%
+  group_by(random_id, trial_num) %>%
+  mutate(sum = sum(as.numeric(value)),
+         prob = ifelse(sum == 0, 0, as.numeric(value)/sum))
+
+# take the average across two observations
+dat <- dat %>%
+  group_by(trial_id, utterance) %>%
+  summarize(avg_prob = mean(prob, na.rm = TRUE),
+            sd_prob = sd(prob),
+            se_prob = sd(prob)/sqrt(n())) %>%
+  mutate(condition = ifelse(substring(trial_id, 1, 1) == "e", "unknown election", "gumball"),
+         event_type = ifelse(substring(trial_id, 1, 1) == "e",
+                       ifelse(substring(trial_id, 3, 3) == "x", "Party X", "Party Y"),
+                       ifelse(substring(trial_id, 3, 3) == "p", "purple gumball", "orange gumball")),
+         event_likelihood = as.numeric(substring(trial_id, 4, 4))*10)
+  
+```
+
+
+```{r gumball plots}
+plot <- ggplot(subset(dat, condition == "gumball"), 
+             aes(x = event_likelihood, y = avg_prob, color = utterance)) +
+        geom_line() + 
+        geom_point() + 
+        geom_errorbar(aes(ymin=avg_prob - 2*se_prob,
+                          ymax=avg_prob + 2*se_prob),
+                      width = 2) +
+        labs(x = "event probability", 
+             y = "probability of using utterance") + 
+        facet_grid(~event_type) + 
+        ylim(0, 1)
+ggsave("gumball_empirical.png", plot = plot, width = 8, height = 4)
+```
+
+```{r unk election plots}
+plot <- ggplot(subset(dat, condition == "unknown election"), 
+             aes(x = event_likelihood, y = avg_prob, color = utterance)) +
+        geom_line() + 
+        geom_point() + 
+        geom_errorbar(aes(ymin=avg_prob - 2*se_prob,
+                          ymax=avg_prob + 2*se_prob),
+                      width = 2) +
+        labs(x = "event probability", 
+             y = "probability of using utterance") + 
+        facet_grid(~event_type) + 
+        ylim(0, 1)
+ggsave("unk_election_empirical.png", plot = plot, width = 8, height = 4)
+
+```
